@@ -5,18 +5,13 @@ import random
 import heapq
 from matplotlib.colors import ListedColormap, BoundaryNorm
 
-
 def astar(room, start, goal):
-
     width, height = room.shape
-
     def heuristic(a, b):
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
     open_set = []
     heapq.heappush(open_set, (heuristic(start, goal), 0, start, [start]))
     visited = set()
-
     while open_set:
         est, cost, current, path = heapq.heappop(open_set)
         if current == goal:
@@ -34,8 +29,8 @@ def astar(room, start, goal):
     return None
 
 
-def generate_room(size, num_obstacles=30):
-    
+
+def generate_room(size, num_obstacles=30, num_corridors=4):
     width, height = size
     room = np.zeros((width, height), dtype=int)
 
@@ -44,227 +39,143 @@ def generate_room(size, num_obstacles=30):
         y = random.randint(1, height - 2)
         room[x, y] = 1
 
-    num_closed_objects = 2  
-    
-    for _ in range(num_closed_objects):
-        obj_width = random.randint(3, 6)
-        obj_height = random.randint(3, 6)
+    for _ in range(3):
+        x = random.randint(1, width - 5)   
+        y = random.randint(1, height - 4)  
 
-        max_x = width - obj_height - 1
-        max_y = height - obj_width - 1
-        if max_x < 1 or max_y < 1:
-            continue  
-        top_left_x = random.randint(1, max_x)
-        top_left_y = random.randint(1, max_y)
-
-        room[top_left_x, top_left_y:top_left_y + obj_width] = 1  # Top border.
-        room[top_left_x + obj_height - 1, top_left_y:top_left_y + obj_width] = 1  # Bottom border.
-        room[top_left_x:top_left_x + obj_height, top_left_y] = 1  # Left border.
-        room[top_left_x:top_left_x + obj_height, top_left_y + obj_width - 1] = 1  # Right border.
-
-        
-        room[top_left_x + 1:top_left_x + obj_height - 1, top_left_y + 1:top_left_y + obj_width - 1] = 2
+        room[x:x+4, y] = 1
+        room[x:x+4, y+2] = 1
 
     return room
 
 
-class Drone:
 
+class Drone:
     def __init__(self, room, start):
         self.room = room
-        self.x, self.y = start  # Current cell
-        self.path = [start]  # Actual path.
+        self.x, self.y = start
+        self.path = [start]
         self.visited = np.zeros(room.shape, dtype=bool)
         self.visited[start] = True
-        self.planned_path = []  # Current planned route (list of cells).
-        self.built_map = np.full(room.shape, -1, dtype=int) # Build map from LiDAR scans.
-        self.lidar_range = 5  # Maximum LiDAR range.
-
-        # Pose graph (for illustration).
+        self.planned_path = []
+        self.built_map = np.full(room.shape, -1, dtype=float)
+        self.checked_map = np.zeros(room.shape, dtype=bool)
+        self.built_map[start] = 0
+        self.checked_map[start] = True
+        self.lidar_range = 5
         self.pose_graph = nx.Graph()
         self.pose_counter = 0
         self.pose_graph.add_node(self.pose_counter, pos=start)
-
-    def get_free_neighbors(self):
-
-        neighbors = []
-        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            nx_cell = self.x + dx
-            ny_cell = self.y + dy
-            if (0 <= nx_cell < self.room.shape[0]
-                    and 0 <= ny_cell < self.room.shape[1]
-                    and self.room[nx_cell, ny_cell] == 0):
-                neighbors.append((nx_cell, ny_cell))
-        return neighbors
+        self.lidar_points = []
 
     def move_to(self, next_pos):
-
         self.x, self.y = next_pos
         self.path.append(next_pos)
         self.visited[next_pos] = True
         self.pose_counter += 1
         self.pose_graph.add_node(self.pose_counter, pos=next_pos)
-        self.pose_graph.add_edge(self.pose_counter - 1, self.pose_counter, weight=1)
+        self.pose_graph.add_edge(self.pose_counter - 1, self.pose_counter)
 
     def plan_next_goal(self):
+        width, height = self.built_map.shape
+        potential_goals = []
+        for x in range(width):
+            for y in range(height):
+                if self.built_map[x, y] == 0:  
+                    for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < width and 0 <= ny < height:
+                            if self.built_map[nx, ny] == -1:  
+                                potential_goals.append((x, y))
+                                break
 
-        width, height = self.room.shape
-        candidates = [(i, j) for i in range(width) for j in range(height)
-            if self.room[i, j] == 0 and not self.visited[i, j]]
-        if candidates:
-            curr = (self.x, self.y)
-            candidates.sort(key=lambda cell: abs(cell[0] - curr[0]) + abs(cell[
-                1] - curr[1]))
-            return candidates[0]
-        free_cells = [(i, j) for i in range(width) for j in range(height)
-            if self.room[i, j] == 0 and (i, j) != (self.x, self.y)]
-        if free_cells:
-            return random.choice(free_cells)
+        potential_goals.sort(key=lambda c: abs(c[0] - self.x) + abs(c[1] - self.y))
+        for goal in potential_goals:
+            path = astar(self.room, (self.x, self.y), goal)
+            if path:
+                return goal
         return None
 
+
     def plan_path_to_goal(self, goal):
-        start = (self.x, self.y)
-        return astar(self.room, start, goal)
+        return astar(self.room, (self.x, self.y), goal)
 
     def follow_planned_path(self):
-        
-        if self.planned_path and len(self.planned_path) > 1:
-            self.planned_path.pop(0)
-            next_pos = self.planned_path[0]
-            self.move_to(next_pos)
-            return
-
-        goal = self.plan_next_goal()
-        if goal is not None:
-            new_path = self.plan_path_to_goal(goal)
-            if new_path is not None and len(new_path) > 1:
-                self.planned_path = new_path
-                self.planned_path.pop(0)
-                next_pos = self.planned_path[0]
-                self.move_to(next_pos)
-                return
-
-        # Fall back: choose a random free neighbor.
-        neighbors = self.get_free_neighbors()
-        if neighbors:
-            next_pos = random.choice(neighbors)
-            self.planned_path = [(self.x, self.y), next_pos]
-            self.move_to(next_pos)
+        if self.planned_path:
+            self.move_to(self.planned_path.pop(0))
 
     def scan_environment(self):
-        
-        measurements = []
-        angles = [0, 90, 180, 270]
-        for angle in angles:
-            hit_obstacle = False
-            for r in range(1, self.lidar_range + 1):
-                lx = self.x + int(round(np.cos(np.radians(angle)) * r))
-                ly = self.y + int(round(np.sin(np.radians(angle)) * r))
+        self.lidar_points = []
+        directions = [(1, 0), (-1, 0), (0, 1), (0, -1),  
+                      (1, 1), (-1, -1), (1, -1), (-1, 1)]  
+
+        for dx, dy in directions:
+            noisy_range = max(1, self.lidar_range + np.random.normal(0, 0.4))  
+
+            for r in range(1, int(noisy_range) + 1):  
+                lx = self.x + dx * r
+                ly = self.y + dy * r
+
                 if 0 <= lx < self.room.shape[0] and 0 <= ly < self.room.shape[1]:
-                    if self.room[lx, ly] != 0:
+                    if self.room[lx, ly] == 1:  
                         self.built_map[lx, ly] = 1
-                        measurements.append((lx, ly))
-                        hit_obstacle = True
+                        self.checked_map[lx, ly] = True
                         break
-                    else:
+
+                    self.lidar_points.append((lx, ly)) 
+
+                    if self.room[lx, ly] == 0 and not self.checked_map[lx, ly]:
                         self.built_map[lx, ly] = 0
-                else:
-                    break
-            if not hit_obstacle:
-                for r in range(1, self.lidar_range + 1):
-                    lx = self.x + int(round(np.cos(np.radians(angle)) * r))
-                    ly = self.y + int(round(np.sin(np.radians(angle)) * r))
-                    if 0 <= lx < self.room.shape[0] and 0 <= ly < self.room.shape[1]:
-                        self.built_map[lx, ly] = 0
-        return measurements
+                        self.checked_map[lx, ly] = True
 
 
-
-def visualize(room, drone):
-    
-    fig, axs = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Left: Display room layout and drone path.
-    axs[0].imshow(room.T,
-                  cmap="gray_r",
-                  origin='lower',
-                  extent=[0, room.shape[0], 0, room.shape[1]])
+def visualize_step(room, drone, axs):
+    axs[0].clear()
+    axs[1].clear()
+    axs[0].imshow(room.T, cmap="gray_r", origin='lower')
     rp = np.array(drone.path)
-    if rp.shape[0] > 0:
-        axs[0].plot(rp[:, 0] + 0.5,
-                    rp[:, 1] + 0.5,
-                    'b.-',
-                    label="Drone Path",
-                    linewidth=2)
-    axs[0].scatter(drone.x + 0.5, drone.y + 0.5, c="red", s=80, label="Drone")
-    if drone.planned_path and len(drone.planned_path) > 1:
+    axs[0].plot(rp[:, 0] + 0.5, rp[:, 1] + 0.5, 'b.-')
+    axs[0].scatter(drone.x + 0.5, drone.y + 0.5, c="red", s=80)
+    if drone.planned_path:
         pp = np.array(drone.planned_path)
-        axs[0].plot(pp[:, 0] + 0.5,
-                    pp[:, 1] + 0.5,
-                    'k--',
-                    label="Planned Route",
-                    linewidth=2)
-    axs[0].set_xlim(0, room.shape[0])
-    axs[0].set_ylim(0, room.shape[1])
-    axs[0].set_title("Room Map & Drone Trajectory")
-    axs[0].legend(loc="upper right")
+        axs[0].plot(pp[:, 0] + 0.5, pp[:, 1] + 0.5, 'k--')
+    if drone.lidar_points:
+        lp = np.array(drone.lidar_points)
+        axs[0].scatter(lp[:, 0] + 0.5, lp[:, 1] + 0.5, c='yellow', s=10)
 
-    # Right: Display the built occupancy grid.
-    cmap_built = ListedColormap(['lightblue', 'white', 'black'])
-    bounds = [-1.5, -0.5, 0.5, 1.5]
-    norm = BoundaryNorm(bounds, cmap_built.N)
-    axs[1].imshow(drone.built_map.T,
-                  cmap=cmap_built,
-                  norm=norm,
-                  origin='lower',
-                  extent=[0, room.shape[0], 0, room.shape[1]])
-    axs[1].set_title("Built Map via LiDAR Scans")
+    cmap = ListedColormap(['white', 'gray', 'black'])
+    bounds = [-1.5, -0.1, 0.1, 1.5]
+    norm = BoundaryNorm(bounds, cmap.N)
+    axs[1].imshow(drone.built_map.T, cmap=cmap, norm=norm, origin='lower')
 
-    # Mark the start of the drone's path with a distinct color (green for example).
-    start_pos = drone.path[0] if drone.path else (drone.x, drone.y)  # Get the start position
-    axs[0].scatter(start_pos[0] + 0.5,
-                   start_pos[1] + 0.5,
-                   c="green",
-                   s=100,
-                   label="Start",
-                   edgecolors="black",
-                   marker="o")
+    axs[0].set_title("Room & Path")
+    axs[1].set_title("Built Map")
+    plt.pause(0.1)
 
-    plt.tight_layout()
-    plt.show()
-
-
-#main
-
-room_size = (20, 20)
-room = generate_room(room_size, num_obstacles=30)
-
-# Select a valid starting position (must be a free cell)
-default_start = (room_size[0] // 2, room_size[1] // 2)
-if room[default_start] != 0:
-    free_cells = [(i, j) for i in range(room_size[0])
-                  for j in range(room_size[1]) if room[i, j] == 0]
-    start = random.choice(free_cells) if free_cells else default_start
-else:
-    start = default_start
-
-print(f"Drone starting at {start}")
+room = generate_room((20, 20))
+start = (10, 10) if room[10, 10] == 0 else tuple(np.argwhere(room == 0)[0])
 drone = Drone(room, start)
 
-# Count the number of free (navigable) cells
-total_free = np.sum(room == 0)
-
-# Begin exploration and mapping
+fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+max_iter = 5000
 iteration = 0
-max_iterations = 10000  # Safety limit
-while np.sum(np.logical_and(drone.visited, room == 0)) < total_free and iteration < max_iterations:
-    drone.follow_planned_path()
+
+while iteration < max_iter:
     drone.scan_environment()
+    if not drone.planned_path:
+        goal = drone.plan_next_goal()
+        if goal:
+            path = drone.plan_path_to_goal(goal)
+            if path is not None:
+                drone.planned_path = path
+                drone.planned_path.pop(0) 
+            else:
+                drone.planned_path = []
+    drone.follow_planned_path()
+    if iteration % 5 == 0:
+        visualize_step(room, drone, axs)
     iteration += 1
 
-    if iteration % 100 == 0:
-        visited = np.sum(np.logical_and(drone.visited, room == 0))
-        print(f"Iteration {iteration}: {visited}/{total_free} free cells visited.")
 
-print(f"Mapping complete after {iteration} iterations.")
-visualize(room, drone)
+print("Exploration complete.")
+plt.show()
